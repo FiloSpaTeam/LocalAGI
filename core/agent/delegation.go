@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mudler/LocalAGI/core/interactions"
 	"github.com/mudler/LocalAGI/core/types"
 	"github.com/mudler/cogito"
 	"github.com/sashabaranov/go-openai"
@@ -217,6 +218,31 @@ func (a *Agent) emitSubAgent(job *types.Job, child *cogito.AgentState, status st
 }
 
 func (a *Agent) emitJobEvent(job *types.Job, event string, payload map[string]any) {
+	if id, _ := job.Metadata[types.MetadataKeyDelegationID].(string); id != "" {
+		if _, exists := payload["agent_id"]; !exists {
+			payload["agent_id"] = id
+		}
+		if _, exists := payload["message_id"]; !exists {
+			if root, _ := job.Metadata[types.MetadataKeyParentMessageID].(string); root != "" {
+				payload["message_id"] = root
+			}
+		}
+	}
+	// A parent can park while a child is asking for input. Preserve that status
+	// until every interaction in the conversation has been answered.
+	if event == "json_message_status" && (payload["status"] == "waiting_agents" || payload["status"] == "processing") {
+		registry, ok := job.InteractionHandler.(interface {
+			Pending(string) interactions.Snapshot
+		})
+		if ok {
+			id, _ := job.Metadata[types.MetadataKeyConversationID].(string)
+			pending := registry.Pending(id)
+			if len(pending.Questions) > 0 || pending.Plan != nil {
+				payload["status"] = "waiting_user"
+			}
+		}
+	}
+
 	if id, ok := job.Metadata[types.MetadataKeyConversationID].(string); ok && id != "" {
 		payload["conversation_id"] = id
 	}
@@ -226,7 +252,7 @@ func (a *Agent) emitJobEvent(job *types.Job, event string, payload map[string]an
 	payload["timestamp"] = time.Now().Format(time.RFC3339)
 	if job.EventCallback != nil {
 		job.EventCallback(event, payload)
-	} else if a.options.interactionCallback != nil {
+	} else if (job.InteractionHandler == nil || job.InteractionHandler == a.interactions) && a.options.interactionCallback != nil {
 		a.options.interactionCallback(event, payload)
 	}
 }

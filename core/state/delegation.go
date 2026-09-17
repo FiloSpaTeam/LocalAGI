@@ -59,6 +59,7 @@ func (a *AgentPool) subAgentProvider(name string, config *AgentConfig) func(job 
 		for peerName, peer := range a.agents {
 			poolAgents[peerName] = peer
 		}
+		resolver := a.subAgentResolver
 		a.Unlock()
 
 		allowed := make(map[string]struct{}, len(allowedNames))
@@ -69,21 +70,18 @@ func (a *AgentPool) subAgentProvider(name string, config *AgentConfig) func(job 
 		}
 		allowAllPeers := len(allowedNames) == 0
 
+		resolved := resolvedSubAgents(name, job, poolConfigs, resolver)
 		definitions := make(map[string]cogito.AgentDefinition)
-		for peerName, peerConfig := range poolConfigs {
-			if peerName == name {
-				continue
-			}
+		for visibleName, peerName := range resolved {
 			if !allowAllPeers {
-				if _, ok := allowed[peerName]; !ok {
+				if _, ok := allowed[visibleName]; !ok {
 					continue
 				}
 			}
-			definitions[peerName] = cogito.AgentDefinition{
-				Name:         peerName,
-				Description:  peerConfig.Description,
-				SystemPrompt: peerConfig.SystemPrompt,
-				Model:        peerConfig.Model,
+			peerConfig := poolConfigs[peerName]
+			definitions[visibleName] = cogito.AgentDefinition{
+				Name: visibleName, Description: peerConfig.Description,
+				SystemPrompt: peerConfig.SystemPrompt, Model: peerConfig.Model,
 			}
 		}
 
@@ -111,19 +109,33 @@ func (a *AgentPool) subAgentProvider(name string, config *AgentConfig) func(job 
 
 		dispatch := func(ctx context.Context, spec cogito.AgentRunSpec) (cogito.Fragment, error) {
 			if remote, ok := remotes[spec.Type]; ok {
-				return dispatchRemoteAgent(ctx, remote, spec)
+				return dispatchRemoteAgent(ctx, a.remoteHTTPClient(), remote, spec)
 			}
 
+			a.Lock()
+			currentResolver := a.subAgentResolver
+			currentConfigs := make(AgentPoolData, len(a.pool))
+			for key, cfg := range a.pool {
+				currentConfigs[key] = cfg
+			}
+			a.Unlock()
 			_, explicitlyAllowed := allowed[spec.Type]
-			_, configured := poolConfigs[spec.Type]
-			if !configured || spec.Type == name || (!allowAllPeers && !explicitlyAllowed) {
+			peerName, configured := resolved[spec.Type]
+			if !configured || (!allowAllPeers && !explicitlyAllowed) {
+				if resolver != nil || currentResolver != nil {
+					return cogito.Fragment{}, fmt.Errorf("local sub-agent %q is not authorized", spec.Type)
+				}
 				if explicitlyAllowed {
 					return cogito.Fragment{}, fmt.Errorf("allowed local sub-agent %q is not configured", spec.Type)
 				}
 				return cogito.Fragment{}, cogito.ErrDispatchFallback
 			}
+			currentResolved := resolvedSubAgents(name, job, currentConfigs, currentResolver)
+			if currentPeer, ok := currentResolved[spec.Type]; !ok || currentPeer != peerName {
+				return cogito.Fragment{}, fmt.Errorf("local sub-agent %q is no longer authorized", spec.Type)
+			}
 
-			peer := poolAgents[spec.Type]
+			peer := poolAgents[peerName]
 			if peer == nil {
 				return cogito.Fragment{}, fmt.Errorf("local sub-agent %q is not running", spec.Type)
 			}
@@ -132,15 +144,22 @@ func (a *AgentPool) subAgentProvider(name string, config *AgentConfig) func(job 
 			if conversationID, ok := job.Metadata[types.MetadataKeyConversationID].(string); ok && conversationID != "" {
 				parentID = conversationID
 			}
+			metadata := make(map[string]any, len(job.Metadata)+4)
+			for key, value := range job.Metadata {
+				metadata[key] = value
+			}
+			metadata[types.MetadataKeyConversationID] = parentID
+			metadata["parent_agent_id"] = name
+			if rootMessage, ok := metadata[types.MetadataKeyParentMessageID].(string); !ok || rootMessage == "" {
+				metadata[types.MetadataKeyParentMessageID] = job.UUID
+			}
+			metadata[types.MetadataKeyDelegationID] = spec.ID
 			result := peer.Ask(
 				types.WithText(spec.Task),
 				types.WithContext(ctx),
-				types.WithMetadata(map[string]any{
-					types.MetadataKeyConversationID: parentID,
-					"parent_agent_id":               name,
-					"parent_message_id":             job.UUID,
-					types.MetadataKeyDelegationID:   spec.ID,
-				}),
+				types.WithInteractionHandler(job.InteractionHandler),
+				types.WithEventCallback(job.EventCallback),
+				types.WithMetadata(metadata),
 			)
 			if result == nil {
 				return cogito.Fragment{}, fmt.Errorf("local sub-agent %q returned no result", spec.Type)
@@ -162,7 +181,7 @@ type poolAgent interface {
 	Ask(opts ...types.JobOption) *types.JobResult
 }
 
-func dispatchRemoteAgent(ctx context.Context, remote RemoteAgent, spec cogito.AgentRunSpec) (cogito.Fragment, error) {
+func dispatchRemoteAgent(ctx context.Context, client HTTPDoer, remote RemoteAgent, spec cogito.AgentRunSpec) (cogito.Fragment, error) {
 	displayName := redactRemoteSecret(remote.Name, remote.APIKey)
 	payload, err := json.Marshal(remoteResponsesRequest{Model: remote.Name, Input: spec.Task})
 	if err != nil {
@@ -179,7 +198,7 @@ func dispatchRemoteAgent(ctx context.Context, remote RemoteAgent, spec cogito.Ag
 		req.Header.Set("Authorization", "Bearer "+remote.APIKey)
 	}
 
-	response, err := http.DefaultClient.Do(req)
+	response, err := client.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return cogito.Fragment{}, ctxErr

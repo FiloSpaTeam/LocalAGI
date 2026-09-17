@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mudler/cogito"
+	"github.com/mudler/cogito/structures"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -18,6 +19,17 @@ const MetadataKeyConversationID = "conversation_id"
 // the parent conversation identity available in metadata and events.
 const MetadataKeyDelegationID = "delegation_id"
 
+// MetadataKeyParentMessageID identifies the root chat message for delegated events.
+const MetadataKeyParentMessageID = "parent_message_id"
+
+// InteractionHandler lets delegated jobs use their parent's question and plan
+// registry without tying the job package to a particular registry implementation.
+// Implementations must support concurrent children and honor the supplied context.
+type InteractionHandler interface {
+	HandleQuestion(*Job, context.Context, cogito.UserQuestion) (cogito.UserAnswer, error)
+	ApprovePlan(*Job, context.Context, *structures.Plan, *structures.Goal) cogito.PlanDecision
+}
+
 // Job is a request to the agent to do something
 type Job struct {
 	// The job is a request to the agent to do something
@@ -28,6 +40,7 @@ type Job struct {
 	ResultCallback      func(ActionState)
 	StreamCallback      func(cogito.StreamEvent)
 	EventCallback       func(string, any)
+	InteractionHandler  InteractionHandler
 	ConversationHistory []openai.ChatCompletionMessage
 	UUID                string
 	Metadata            map[string]interface{}
@@ -255,4 +268,9 @@ func (j *Job) GetAllTools() []ActionDefinition {
 // WithEventCallback receives job lifecycle events (including parked replies).
 func WithEventCallback(callback func(string, any)) JobOption {
 	return func(job *Job) { job.EventCallback = callback }
+}
+
+// WithInteractionHandler routes questions and approvals to an owning parent.
+func WithInteractionHandler(handler InteractionHandler) JobOption {
+	return func(job *Job) { job.InteractionHandler = handler }
 }

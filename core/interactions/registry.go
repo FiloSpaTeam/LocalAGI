@@ -34,6 +34,7 @@ type Question struct {
 
 // Plan is a pending plan approval with the job identity needed by a UI.
 type Plan struct {
+	AgentID        string    `json:"agent_id,omitempty"`
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id,omitempty"`
 	MessageID      string    `json:"message_id"`
@@ -99,6 +100,9 @@ func (r *Registry) HandleQuestion(job *types.Job, ctx context.Context, q cogito.
 		ctx = context.Background()
 	}
 	wrapped, cancel := context.WithCancel(ctx)
+	if q.AgentID == "" {
+		q.AgentID = delegationID(job)
+	}
 	record := &questionRecord{
 		question: Question{
 			UserQuestion:   cloneUserQuestion(q),
@@ -146,7 +150,7 @@ func (r *Registry) onQuestion(q cogito.UserQuestion) {
 	shown := cloneQuestion(record.question)
 	r.mu.Unlock()
 
-	r.emitEvent("json_message_status", statusPayload("waiting_user", shown.ConversationID, shown.MessageID))
+	r.emitJobEvent(record.job, "json_message_status", statusPayload("waiting_user", shown.ConversationID, shown.MessageID))
 
 	r.mu.Lock()
 	stillPending := r.question[q.ID] == record && record.ctx.Err() == nil
@@ -155,7 +159,7 @@ func (r *Registry) onQuestion(q cogito.UserQuestion) {
 	}
 	r.mu.Unlock()
 	if stillPending {
-		r.emitEvent("question", shown)
+		r.emitJobEvent(record.job, "question", shown)
 	}
 }
 
@@ -163,7 +167,7 @@ func (r *Registry) deliverAnswer(record *questionRecord, id string, answer cogit
 	if record.ctx.Err() != nil {
 		return cogito.ErrQuestionNotFound
 	}
-	r.emitEvent("json_message_status", statusPayload("processing", record.question.ConversationID, record.question.MessageID))
+	r.emitJobEvent(record.job, "json_message_status", statusPayload("processing", record.question.ConversationID, record.question.MessageID))
 	if record.ctx.Err() != nil {
 		return cogito.ErrQuestionNotFound
 	}
@@ -213,6 +217,7 @@ func (r *Registry) ApprovePlan(job *types.Job, ctx context.Context, plan *struct
 	original := clonePlan(plan)
 	record := &planRecord{
 		plan: Plan{
+			AgentID:        delegationID(job),
 			ID:             uuid.NewString(),
 			ConversationID: conversationID(job),
 			MessageID:      messageID(job),
@@ -256,7 +261,7 @@ func (r *Registry) publishPlan(record *planRecord) {
 	if record.ctx.Err() != nil {
 		return
 	}
-	r.emitEvent("json_message_status", statusPayload("waiting_user", record.plan.ConversationID, record.plan.MessageID))
+	r.emitJobEvent(record.job, "json_message_status", statusPayload("waiting_user", record.plan.ConversationID, record.plan.MessageID))
 	r.mu.Lock()
 	stillPending := r.plans[record.plan.ID] == record && record.ctx.Err() == nil
 	if stillPending {
@@ -264,7 +269,7 @@ func (r *Registry) publishPlan(record *planRecord) {
 	}
 	r.mu.Unlock()
 	if stillPending {
-		r.emitEvent("plan", clonePublicPlan(record.plan))
+		r.emitJobEvent(record.job, "plan", clonePublicPlan(record.plan))
 	}
 }
 
@@ -312,7 +317,7 @@ func (r *Registry) deliverDecision(record *planRecord, decision cogito.PlanDecis
 	if record.ctx.Err() != nil {
 		return ErrPlanNotFound
 	}
-	r.emitEvent("json_message_status", statusPayload("processing", record.plan.ConversationID, record.plan.MessageID))
+	r.emitJobEvent(record.job, "json_message_status", statusPayload("processing", record.plan.ConversationID, record.plan.MessageID))
 	if record.ctx.Err() != nil {
 		return ErrPlanNotFound
 	}
@@ -414,7 +419,25 @@ func (r *Registry) CancelAll() {
 	}
 }
 
-func (r *Registry) emitEvent(event string, payload any) {
+func (r *Registry) emitJobEvent(job *types.Job, event string, payload any) {
+	if event == "json_message_status" {
+		if status, ok := payload.(map[string]any); ok {
+			if id := delegationID(job); id != "" {
+				status["agent_id"] = id
+			}
+			if status["status"] == "processing" {
+				pending := r.Pending(conversationID(job))
+				if len(pending.Questions) > 0 || pending.Plan != nil {
+					status["status"] = "waiting_user"
+				}
+			}
+		}
+	}
+
+	if job != nil && job.EventCallback != nil {
+		job.EventCallback(event, payload)
+		return
+	}
 	if r.emit != nil {
 		r.emit(event, payload)
 	}
@@ -444,7 +467,20 @@ func messageID(job *types.Job) string {
 	if job == nil {
 		return ""
 	}
+	if delegationID(job) != "" {
+		if id, _ := job.Metadata[types.MetadataKeyParentMessageID].(string); id != "" {
+			return id
+		}
+	}
 	return job.UUID
+}
+
+func delegationID(job *types.Job) string {
+	if job == nil {
+		return ""
+	}
+	id, _ := job.Metadata[types.MetadataKeyDelegationID].(string)
+	return id
 }
 
 func questionLess(a, b *questionRecord) bool {

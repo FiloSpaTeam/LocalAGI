@@ -1375,6 +1375,18 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		),
 	}
 
+	// Keep a single root registry and event sink across pool delegation. Children
+	// inherit these through their job rather than replacing the peer's own registry.
+	if job.InteractionHandler == nil {
+		job.InteractionHandler = a.interactions
+		if job.EventCallback == nil {
+			job.EventCallback = a.options.interactionCallback
+			if job.EventCallback == nil {
+				// Preserve an intentionally silent root when peers have sinks.
+				job.EventCallback = func(string, any) {}
+			}
+		}
+	}
 	var finishDelegation func(cogito.Fragment) cogito.Fragment
 	if a.options.enableSubAgents {
 		delegationOpts, cleanup, finish := a.delegationOptions(job)
@@ -1385,12 +1397,12 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 
 	if a.options.enableUserQuestions {
 		cogitoOpts = append(cogitoOpts, cogito.WithUserQuestions(func(ctx context.Context, question cogito.UserQuestion) (cogito.UserAnswer, error) {
-			return a.interactions.HandleQuestion(job, ctx, question)
+			return job.InteractionHandler.HandleQuestion(job, ctx, question)
 		}))
 	}
 	if a.options.canPlan && a.options.requirePlanApproval {
 		cogitoOpts = append(cogitoOpts, cogito.WithPlanApproval(func(ctx context.Context, plan *structures.Plan, goal *structures.Goal) cogito.PlanDecision {
-			return a.interactions.ApprovePlan(job, ctx, plan, goal)
+			return job.InteractionHandler.ApprovePlan(job, ctx, plan, goal)
 		}))
 	}
 

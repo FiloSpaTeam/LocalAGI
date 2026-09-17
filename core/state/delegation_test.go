@@ -140,12 +140,18 @@ func TestSubAgentDispatcherInvokesPoolAgentWithDelegationMetadata(t *testing.T) 
 		pool:   AgentPoolData{"parent": {Name: "parent"}, "peer": {Name: "peer", Description: "helper"}},
 		agents: map[string]*coreagent.Agent{"peer": peer},
 	}
+	parentEvents := 0
 	parent := types.NewJob(
+		types.WithInteractionHandler(peer.Interactions()),
+		types.WithEventCallback(func(string, any) { parentEvents++ }),
 		types.WithUUID("parent-message"),
-		types.WithMetadata(map[string]any{types.MetadataKeyConversationID: "conversation-1"}),
+		types.WithMetadata(map[string]any{types.MetadataKeyConversationID: "conversation-1", "tenant": "tenant-a", "parent_message_id": "root-message"}),
 	)
-	_, dispatch := pool.subAgentProvider("parent", &AgentConfig{EnableSubAgents: true})(parent)
-	fragment, err := dispatch(context.Background(), cogito.AgentRunSpec{ID: "delegation-1", Type: "peer", Task: "do work"})
+	pool.SetSubAgentResolver(func(_ string, _ *types.Job, candidate string) (string, bool) {
+		return "visible-" + candidate, true
+	})
+	_, dispatch := pool.subAgentProvider("parent", &AgentConfig{EnableSubAgents: true, SubAgents: []string{"visible-peer"}})(parent)
+	fragment, err := dispatch(context.Background(), cogito.AgentRunSpec{ID: "delegation-1", Type: "visible-peer", Task: "do work"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +165,25 @@ func TestSubAgentDispatcherInvokesPoolAgentWithDelegationMetadata(t *testing.T) 
 	if delegated == nil || len(delegated.ConversationHistory) != 1 || delegated.ConversationHistory[0].Content != "do work" {
 		t.Fatalf("delegated job did not carry task: %+v", delegated)
 	}
+	if delegated.InteractionHandler != parent.InteractionHandler {
+		t.Fatal("dispatcher lost root interaction handler")
+	}
+	if delegated.EventCallback == nil {
+		t.Fatal("dispatcher lost root event sink")
+	}
+	delegated.EventCallback("test", nil)
+	if parentEvents != 1 {
+		t.Fatal("dispatcher replaced root event sink")
+	}
 	wantMetadata := map[string]any{
 		types.MetadataKeyConversationID: "conversation-1",
 		"parent_agent_id":               "parent",
-		"parent_message_id":             "parent-message",
+		"parent_message_id":             "root-message",
+		"tenant":                        "tenant-a",
 		types.MetadataKeyDelegationID:   "delegation-1",
+	}
+	if _, exists := parent.Metadata["parent_agent_id"]; exists {
+		t.Fatal("dispatch mutated parent metadata")
 	}
 	for key, want := range wantMetadata {
 		if got := delegated.Metadata[key]; got != want {
@@ -279,4 +299,133 @@ func remoteTestDispatcher(t *testing.T, url, key string) cogito.AgentDispatcher 
 		RemoteAgents:    []RemoteAgent{{Name: "remote", URL: url, APIKey: key}},
 	})(types.NewJob())
 	return dispatch
+}
+
+func TestSubAgentResolverScopesAliasesAndRevocation(t *testing.T) {
+	pool := &AgentPool{pool: AgentPoolData{
+		"tenant-a/parent": {Name: "parent"}, "tenant-a/worker": {Name: "worker", SystemPrompt: "authorized prompt"},
+		"tenant-b/worker": {Name: "worker", SystemPrompt: "private prompt"},
+		"tenant-a/second": {Name: "second", SystemPrompt: "unlisted prompt"},
+	}}
+	job := types.NewJob(types.WithMetadata(map[string]any{"tenant": "tenant-a"}))
+	pool.SetSubAgentResolver(func(parent string, gotJob *types.Job, candidate string) (string, bool) {
+		if parent != "tenant-a/parent" || gotJob != job {
+			t.Errorf("resolver lost caller context")
+		}
+		return strings.TrimPrefix(candidate, "tenant-a/"), strings.HasPrefix(candidate, "tenant-a/")
+	})
+	defs, dispatch := pool.subAgentProvider("tenant-a/parent", &AgentConfig{EnableSubAgents: true, SubAgents: []string{"worker"}})(job)
+	if len(defs) != 1 || defs[0].Name != "worker" || defs[0].SystemPrompt != "authorized prompt" {
+		t.Fatalf("scoped definitions = %+v", defs)
+	}
+	for _, name := range []string{"tenant-a/worker", "tenant-b/worker", "second", "parent", "unknown"} {
+		if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: name}); err == nil || errors.Is(err, cogito.ErrDispatchFallback) {
+			t.Errorf("%s did not fail closed: %v", name, err)
+		}
+	}
+	pool.SetSubAgentResolver(func(string, *types.Job, string) (string, bool) { return "", false })
+	if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "worker"}); err == nil || !strings.Contains(err.Error(), "authorized") {
+		t.Fatalf("revoked dispatch = %v", err)
+	}
+}
+
+func TestSubAgentResolverRejectsAmbiguousAliases(t *testing.T) {
+	pool := &AgentPool{pool: AgentPoolData{"parent": {}, "a": {}, "b": {}}}
+	pool.SetSubAgentResolver(func(_ string, _ *types.Job, candidate string) (string, bool) {
+		if candidate == "parent" {
+			return "self", true
+		}
+		return "same", true
+	})
+	defs, dispatch := pool.subAgentProvider("parent", &AgentConfig{EnableSubAgents: true})(types.NewJob())
+	if len(defs) != 0 {
+		t.Fatalf("ambiguous definitions = %+v", defs)
+	}
+	if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "same"}); err == nil || errors.Is(err, cogito.ErrDispatchFallback) {
+		t.Fatalf("ambiguous dispatch = %v", err)
+	}
+}
+
+type delegationHTTPDoer func(*http.Request) (*http.Response, error)
+
+func (f delegationHTTPDoer) Do(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRemoteSubAgentUsesSuppliedHTTPClient(t *testing.T) {
+	pool := &AgentPool{}
+	calls := 0
+	pool.SetRemoteAgentHTTPClient(delegationHTTPDoer(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.String() != "https://private.invalid/v1/responses" || r.Header.Get("Authorization") != "Bearer secret" {
+			t.Fatalf("wrong request: %+v", r)
+		}
+		if r.Context().Err() != nil {
+			return nil, r.Context().Err()
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"output":[{"content":[{"type":"output_text","text":"supplied transport"}]}]}`))}, nil
+	}))
+	_, dispatch := pool.subAgentProvider("parent", &AgentConfig{EnableSubAgents: true, RemoteAgents: []RemoteAgent{{Name: "remote", URL: "https://private.invalid", APIKey: "secret"}}})(types.NewJob())
+	fragment, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "remote"})
+	if err != nil || len(fragment.Messages) != 1 || fragment.Messages[0].Content != "supplied transport" {
+		t.Fatalf("supplied transport result=%+v err=%v", fragment, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := dispatch(ctx, cogito.AgentRunSpec{Type: "remote"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel error=%v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("supplied client calls=%d", calls)
+	}
+	pool.SetRemoteAgentHTTPClient(delegationHTTPDoer(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret private.invalid") }))
+	if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "remote"}); err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private.invalid") {
+		t.Fatalf("transport error=%v", err)
+	}
+}
+
+func TestSubAgentResolverRejectsSelfAliasAndNewAmbiguity(t *testing.T) {
+	pool := &AgentPool{pool: AgentPoolData{"parent": {}, "a": {}, "b": {}}}
+	pool.SetSubAgentResolver(func(_ string, _ *types.Job, candidate string) (string, bool) {
+		if candidate == "a" || candidate == "parent" {
+			return "self", true
+		}
+		return "worker", true
+	})
+	defs, dispatch := pool.subAgentProvider("parent", &AgentConfig{EnableSubAgents: true})(types.NewJob())
+	if len(defs) != 1 || defs[0].Name != "worker" {
+		t.Fatalf("self alias exposed: %+v", defs)
+	}
+	if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "self"}); err == nil || errors.Is(err, cogito.ErrDispatchFallback) {
+		t.Fatalf("self alias dispatched: %v", err)
+	}
+	pool.SetSubAgentResolver(func(_ string, _ *types.Job, candidate string) (string, bool) {
+		if candidate == "parent" {
+			return "self", true
+		}
+		return "worker", true
+	})
+	if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "worker"}); err == nil || !strings.Contains(err.Error(), "authorized") {
+		t.Fatalf("newly ambiguous alias dispatched: %v", err)
+	}
+}
+
+func TestRemoteSubAgentPreservesClientRedirectPolicy(t *testing.T) {
+	followed := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/responses" {
+			http.Redirect(w, r, "/other", http.StatusTemporaryRedirect)
+			return
+		}
+		followed = true
+		io.WriteString(w, `{"output":[]}`)
+	}))
+	defer server.Close()
+	pool := &AgentPool{}
+	pool.SetRemoteAgentHTTPClient(&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	_, dispatch := pool.subAgentProvider("parent", &AgentConfig{EnableSubAgents: true, RemoteAgents: []RemoteAgent{{Name: "remote", URL: server.URL}}})(types.NewJob())
+	if _, err := dispatch(context.Background(), cogito.AgentRunSpec{Type: "remote"}); err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("redirect policy ignored: %v", err)
+	}
+	if followed {
+		t.Fatal("followed a redirect forbidden by host client")
+	}
 }

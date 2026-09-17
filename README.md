@@ -1248,3 +1248,46 @@ This fork pins Cogito commit `8f2ce74a8d14d138a1bde69f379d1258f0a4489c` through
 a Go module replacement while retaining `github.com/mudler/cogito` imports.
 Applications importing this fork must carry the same replacement in their own
 `go.mod`, because Go does not inherit replacements from dependency modules.
+
+### Embedding delegation in a user-scoped application
+
+An embedded pool does not know the host application's users or permissions.
+Before accepting jobs, configure these hooks on `*state.AgentPool`:
+
+```go
+pool.SetSubAgentResolver(func(parent string, job *types.Job, candidate string) (string, bool) {
+    // Resolve the actual pool keys using the host's authenticated ownership
+    // rules. Return a public agent name only for an authorized candidate.
+    return authorizedPeerName(parent, job, candidate)
+})
+pool.SetRemoteAgentHTTPClient(hardenedClient)
+```
+
+`SubAgentResolver` receives the parent's actual pool key, its job, and a candidate
+pool key. Returning `("", false)` hides and denies that candidate. `sub_agents`
+allowlists match the returned public names. Self aliases and ambiguous aliases
+are excluded. Authorization is checked when definitions are built and again
+before a peer is invoked; a denied invocation fails instead of falling back to
+an in-process agent. The callback runs outside the pool lock and must support
+concurrent calls. Scope metadata is copied into child jobs, so nested delegation
+can apply the same policy. The host must derive identity from trusted context or
+metadata, not from model-provided task text.
+
+`SetRemoteAgentHTTPClient` accepts an `HTTPDoer` with
+`Do(*http.Request) (*http.Response, error)`. The supplied client is used directly,
+including its dial, redirect, proxy, and timeout policies; LocalAGI does not
+replace its transport. Remote requests still carry the delegation context.
+Passing nil restores the standalone defaults: identity peer names without a
+user authorization policy, and a pool-owned HTTP client without a fixed timeout.
+Install the resolver and hardened client before serving a shared multi-user pool.
+
+Pool children inherit the root job's `types.InteractionHandler` and event sink.
+Their questions and plan approvals live in the root parent's interaction registry,
+so the existing parent `pending`, `answer`, and `plan` endpoints also handle child
+interactions. Events preserve the root `conversation_id` and `message_id` and
+carry the child's `agent_id`; plan events now include that field too. Free-text
+chat answers use the same parent's registry. Cancelling the parent or child
+removes the corresponding pending interactions. When several approvals are
+pending, the existing `pending.plan` field returns the oldest; fetch pending
+again after deciding it. A remote `/v1/responses` task does not relay questions
+or approvals: that requires a future remote interaction protocol.

@@ -62,6 +62,8 @@ type PoolLimits struct {
 }
 
 type AgentPool struct {
+	subAgentResolver      SubAgentResolver
+	remoteAgentHTTPClient HTTPDoer
 	sync.Mutex
 	file                                                          string
 	pooldir                                                       string
