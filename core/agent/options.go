@@ -92,10 +92,10 @@ type options struct {
 	extraMCPSessions            []*mcp.ClientSession
 	newConversationsSubscribers []func(*types.ConversationMessage)
 
-	observer             Observer
-	enableAutoCompaction   bool
+	observer                Observer
+	enableAutoCompaction    bool
 	autoCompactionThreshold int
-	parallelJobs int
+	parallelJobs            int
 
 	lastMessageDuration time.Duration
 
@@ -106,7 +106,8 @@ type options struct {
 	maxAttempts int
 
 	// streamCallback receives streaming events from cogito during final answer generation.
-	streamCallback func(cogito.StreamEvent)
+	streamCallback    func(cogito.StreamEvent)
+	jobStreamCallback func(*types.Job, cogito.StreamEvent)
 }
 
 func (o *options) SeparatedMultimodalModel() bool {
@@ -631,6 +632,15 @@ func WithAutoCompactionThreshold(threshold int) Option {
 func WithStreamCallback(fn func(cogito.StreamEvent)) Option {
 	return func(o *options) error {
 		o.streamCallback = fn
+		return nil
+	}
+}
+
+// WithJobStreamCallback receives streaming events with their originating job.
+// It runs alongside the agent-wide and request-specific callbacks.
+func WithJobStreamCallback(fn func(*types.Job, cogito.StreamEvent)) Option {
+	return func(o *options) error {
+		o.jobStreamCallback = fn
 		return nil
 	}
 }

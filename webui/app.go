@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mudler/LocalAGI/core/chat"
 	"github.com/mudler/LocalAGI/core/conversations"
 	coreTypes "github.com/mudler/LocalAGI/core/types"
 	internalTypes "github.com/mudler/LocalAGI/core/types"
@@ -33,7 +34,7 @@ import (
 
 type (
 	App struct {
-		config           *Config
+		config *Config
 		*fiber.App
 		sharedState      *internalTypes.AgentSharedState
 		collectionsState *CollectionsState // set when RegisterCollectionRoutes runs; used for in-process RAG
@@ -321,7 +322,8 @@ func (a *App) Chat(pool *state.AgentPool) func(c *fiber.Ctx) error {
 	return func(c *fiber.Ctx) error {
 		// Parse the request body
 		payload := struct {
-			Message string `json:"message"`
+			Message        string `json:"message"`
+			ConversationID string `json:"conversation_id"`
 		}{}
 
 		if err := c.BodyParser(&payload); err != nil {
@@ -355,92 +357,8 @@ func (a *App) Chat(pool *state.AgentPool) func(c *fiber.Ctx) error {
 		// Create a unique message ID
 		messageID := fmt.Sprintf("%d", time.Now().UnixNano())
 
-		// Send user message event via SSE
-		userMessageData, err := json.Marshal(map[string]interface{}{
-			"id":        messageID + "-user",
-			"sender":    "user",
-			"content":   message,
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-		if err != nil {
-			xlog.Error("Error marshaling user message", "error", err)
-		} else {
-			manager.Send(
-				sse.NewMessage(string(userMessageData)).WithEvent("json_message"))
-		}
-
-		// Send processing status
-		statusData, err := json.Marshal(map[string]interface{}{
-			"status":    "processing",
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-		if err != nil {
-			xlog.Error("Error marshaling status message", "error", err)
-		} else {
-			manager.Send(
-				sse.NewMessage(string(statusData)).WithEvent("json_message_status"))
-		}
-
-		// Process the message asynchronously
-		go func() {
-			// Ask the agent for a response
-			response := agent.Ask(coreTypes.WithText(message))
-
-			if response == nil {
-				// Ask returned nil (e.g. context cancelled or WaitResult failed)
-				xlog.Error("Agent returned nil response", "agent", agentName)
-				errorData, err := json.Marshal(map[string]interface{}{
-					"error":     "agent request failed or was cancelled",
-					"timestamp": time.Now().Format(time.RFC3339),
-				})
-				if err != nil {
-					xlog.Error("Error marshaling error message", "error", err)
-				} else {
-					manager.Send(
-						sse.NewMessage(string(errorData)).WithEvent("json_error"))
-				}
-			} else if response.Error != nil {
-				// Send error message
-				xlog.Error("Error asking agent", "agent", agentName, "error", response.Error)
-				errorData, err := json.Marshal(map[string]interface{}{
-					"error":     response.Error.Error(),
-					"timestamp": time.Now().Format(time.RFC3339),
-				})
-				if err != nil {
-					xlog.Error("Error marshaling error message", "error", err)
-				} else {
-					manager.Send(
-						sse.NewMessage(string(errorData)).WithEvent("json_error"))
-				}
-			} else {
-				// Send agent response
-				xlog.Info("Response from agent", "agent", agentName, "response", response.Response)
-				responseData, err := json.Marshal(map[string]interface{}{
-					"id":        messageID + "-agent",
-					"sender":    "agent",
-					"content":   response.Response,
-					"timestamp": time.Now().Format(time.RFC3339),
-				})
-				if err != nil {
-					xlog.Error("Error marshaling agent response", "error", err)
-				} else {
-					manager.Send(
-						sse.NewMessage(string(responseData)).WithEvent("json_message"))
-				}
-			}
-
-			// Send completed status
-			completedData, err := json.Marshal(map[string]interface{}{
-				"status":    "completed",
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
-			if err != nil {
-				xlog.Error("Error marshaling completed status", "error", err)
-			} else {
-				manager.Send(
-					sse.NewMessage(string(completedData)).WithEvent("json_message_status"))
-			}
-		}()
+		// Copy request values into the asynchronous shared chat lifecycle.
+		go chat.Run(agent, message, payload.ConversationID, messageID, manager.Send)
 
 		// Return immediate success response
 		return c.Status(fiber.StatusAccepted).JSON(map[string]interface{}{

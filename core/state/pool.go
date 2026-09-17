@@ -20,6 +20,7 @@ import (
 	"github.com/mudler/LocalAGI/pkg/utils"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/mudler/LocalAGI/core/chat"
 	"github.com/mudler/cogito"
 	"github.com/mudler/xlog"
 )
@@ -651,37 +652,8 @@ func (a *AgentPool) startAgentWithConfig(name, pooldir string, config *AgentConf
 	}
 
 	// Wire cogito streaming events into the SSE manager for live token delivery
-	opts = append(opts, WithStreamCallback(func(ev cogito.StreamEvent) {
-		switch ev.Type {
-		case cogito.StreamEventReasoning:
-			data, _ := json.Marshal(map[string]interface{}{
-				"type":      "reasoning",
-				"content":   ev.Content,
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
-			manager.Send(sseLib.NewMessage(string(data)).WithEvent("stream_event"))
-		case cogito.StreamEventContent:
-			data, _ := json.Marshal(map[string]interface{}{
-				"type":      "content",
-				"content":   ev.Content,
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
-			manager.Send(sseLib.NewMessage(string(data)).WithEvent("stream_event"))
-		case cogito.StreamEventToolCall:
-			data, _ := json.Marshal(map[string]interface{}{
-				"type":      "tool_call",
-				"tool_name": ev.ToolName,
-				"tool_args": ev.ToolArgs,
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
-			manager.Send(sseLib.NewMessage(string(data)).WithEvent("stream_event"))
-		case cogito.StreamEventDone:
-			data, _ := json.Marshal(map[string]interface{}{
-				"type":      "done",
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
-			manager.Send(sseLib.NewMessage(string(data)).WithEvent("stream_event"))
-		}
+	opts = append(opts, WithJobStreamCallback(func(job *types.Job, ev cogito.StreamEvent) {
+		chat.Stream(job, ev, manager.Send)
 	}))
 
 	xlog.Info("Starting agent", "name", name, "config", config)
@@ -974,4 +946,3 @@ func (a *AgentPool) GetManager(name string) sseLib.Manager {
 	defer a.Unlock()
 	return a.managers[name]
 }
-

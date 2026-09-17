@@ -1033,6 +1033,29 @@ curl -X POST "http://localhost:3000/api/chat/my-agent" \
   -d '{"message": "Hello, how are you today?"}'
 ```
 
+Pass an optional `conversation_id` to continue a server-side conversation:
+
+```json
+{"message": "Continue with the next step", "conversation_id": "my-conversation"}
+```
+
+The ID is an opaque, client-chosen string scoped to the agent. Omitting it (or
+sending an empty string) keeps each request stateless. The endpoint returns
+`202 {"status":"message_received","message_id":"..."}`; replies arrive over SSE.
+For identified chats, `json_message`, `json_message_status`, `json_error`, and
+`stream_event` include `conversation_id`. These events also include `message_id`
+to correlate overlapping requests; message `id` fields retain their existing
+`-user` and `-agent` suffixes.
+
+History is held in memory and expires after the agent's `last_message_duration`
+(default `5m`) since the last saved turn. Restarting the process clears it.
+Wait for a turn's `completed` status before starting a turn that must use its
+history. Overlapping requests retain the agent's existing cancellation behavior;
+they do not merge transcripts, and the last successful completion saves history.
+
+Embedders can use `core/chat.Run` for the same lifecycle and
+`agent.WithJobStreamCallback` with `core/chat.Stream` for scoped streaming events.
+
 #### Notify Agent
 ```bash
 curl -X POST "http://localhost:3000/api/notify/my-agent" \

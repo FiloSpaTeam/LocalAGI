@@ -52,3 +52,22 @@ func TestStreamCallbackForJobNilRequestCallbackPreservesAgentCallback(t *testing
 		t.Fatalf("agent callback events = %#v, want agent event", events)
 	}
 }
+
+func TestStreamCallbackForJobPreservesJobIdentity(t *testing.T) {
+	var ids []string
+	var global, request int
+	a := &Agent{options: &options{
+		streamCallback: func(cogito.StreamEvent) { global++ },
+		jobStreamCallback: func(job *types.Job, event cogito.StreamEvent) {
+			ids = append(ids, job.Metadata[types.MetadataKeyConversationID].(string))
+		},
+	}}
+	first := types.NewJob(types.WithMetadata(map[string]any{types.MetadataKeyConversationID: "first"}), types.WithStreamCallback(func(cogito.StreamEvent) { request++ }))
+	second := types.NewJob(types.WithMetadata(map[string]any{types.MetadataKeyConversationID: "second"}))
+	cb1, cb2 := a.streamCallbackForJob(first), a.streamCallbackForJob(second)
+	cb2(cogito.StreamEvent{})
+	cb1(cogito.StreamEvent{})
+	if len(ids) != 2 || ids[0] != "second" || ids[1] != "first" || global != 2 || request != 1 {
+		t.Fatalf("ids=%v global=%d request=%d", ids, global, request)
+	}
+}

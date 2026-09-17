@@ -230,15 +230,20 @@ func (a *Agent) Context() context.Context {
 func (a *Agent) streamCallbackForJob(job *types.Job) func(cogito.StreamEvent) {
 	agentCallback := a.options.streamCallback
 	requestCallback := job.StreamCallback
-	if agentCallback == nil {
-		return requestCallback
-	}
-	if requestCallback == nil {
-		return agentCallback
+	jobCallback := a.options.jobStreamCallback
+	if agentCallback == nil && requestCallback == nil && jobCallback == nil {
+		return nil
 	}
 	return func(event cogito.StreamEvent) {
-		agentCallback(event)
-		requestCallback(event)
+		if agentCallback != nil {
+			agentCallback(event)
+		}
+		if jobCallback != nil {
+			jobCallback(job, event)
+		}
+		if requestCallback != nil {
+			requestCallback(event)
+		}
 	}
 }
 
