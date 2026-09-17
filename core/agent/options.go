@@ -106,8 +106,11 @@ type options struct {
 	maxAttempts int
 
 	// streamCallback receives streaming events from cogito during final answer generation.
-	streamCallback    func(cogito.StreamEvent)
-	jobStreamCallback func(*types.Job, cogito.StreamEvent)
+	streamCallback      func(cogito.StreamEvent)
+	jobStreamCallback   func(*types.Job, cogito.StreamEvent)
+	enableUserQuestions bool
+	requirePlanApproval bool
+	interactionCallback func(string, any)
 }
 
 func (o *options) SeparatedMultimodalModel() bool {
@@ -643,4 +646,20 @@ func WithJobStreamCallback(fn func(*types.Job, cogito.StreamEvent)) Option {
 		o.jobStreamCallback = fn
 		return nil
 	}
+}
+
+// WithUserQuestionsEnabled offers ask_user to the agent. Disabled by default.
+func WithUserQuestionsEnabled(enabled bool) Option {
+	return func(o *options) error { o.enableUserQuestions = enabled; return nil }
+}
+
+// WithRequirePlanApproval gates automatic plans when planning is enabled.
+func WithRequirePlanApproval(required bool) Option {
+	return func(o *options) error { o.requirePlanApproval = required; return nil }
+}
+
+// WithInteractionCallback receives conversation-scoped question, plan and status
+// events. The callback should deliver quickly; it runs on the interacting job.
+func WithInteractionCallback(callback func(string, any)) Option {
+	return func(o *options) error { o.interactionCallback = callback; return nil }
 }

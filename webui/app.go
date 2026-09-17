@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mudler/LocalAGI/core/chat"
 	"github.com/mudler/LocalAGI/core/conversations"
+	"github.com/mudler/LocalAGI/core/interactions"
 	coreTypes "github.com/mudler/LocalAGI/core/types"
 	internalTypes "github.com/mudler/LocalAGI/core/types"
 	"github.com/mudler/LocalAGI/pkg/llm"
@@ -349,6 +351,23 @@ func (a *App) Chat(pool *state.AgentPool) func(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusNotFound).JSON(map[string]interface{}{
 				"error": "Agent not found",
 			})
+		}
+
+		if payload.ConversationID != "" {
+			questionID, handled, err := agent.Interactions().AnswerText(payload.ConversationID, message)
+			switch {
+			case errors.Is(err, interactions.ErrFreeTextNotAllowed):
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"pending_question_id": questionID,
+				})
+			case err != nil:
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+			case handled:
+				return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+					"status":      "answer_received",
+					"question_id": questionID,
+				})
+			}
 		}
 
 		// Get the SSE manager for this agent

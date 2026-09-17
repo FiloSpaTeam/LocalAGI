@@ -1140,3 +1140,61 @@ MIT License — See the [LICENSE](LICENSE) file for details.
   <strong>LOCAL PROCESSING. GLOBAL THINKING.</strong><br>
   Made with ❤️ by <a href="https://github.com/mudler">mudler</a>
 </p>
+
+### Interactive agent questions and plan approval
+
+These features are opt-in per agent:
+
+```json
+{
+  "enable_user_questions": true,
+  "enable_planning": true,
+  "require_plan_approval": true,
+  "last_message_duration": "5m"
+}
+```
+
+`enable_user_questions` offers the `ask_user` tool. `require_plan_approval`
+blocks automatic plan execution when `enable_planning` is also enabled. Both
+flags default to false. This delivery supports standalone/embedded agent execution;
+distributed native-executor parity follows separately. These APIs support
+interactive clients; the LocalAI question and plan cards are delivered separately.
+
+Use the same `conversation_id` on chat requests. The agent sends a `question`
+or `plan` SSE event with `id`, `conversation_id`, `message_id`, and `timestamp`.
+Question events also carry `agent_id`, `question`, `options`, and
+`allow_free_text`. Plan events carry `description` and `subtasks` (strings).
+`json_message_status` changes to `waiting_user` while an interaction is pending
+and returns to `processing` when answered.
+
+| Request | Body or query | Result |
+|---|---|---|
+| `POST /api/chat/:name/answer` | `{"question_id":"…","selected":["print commands"]}` or `{"question_id":"…","text":"…"}` | Resume the question with a validated answer |
+| `POST /api/chat/:name/plan` | `{"plan_id":"…","approved":true}` | Execute the proposed plan |
+| `POST /api/chat/:name/plan` | `{"plan_id":"…","approved":true,"subtasks":["edited first step","second step"]}` | Execute the edited ordered steps |
+| `POST /api/chat/:name/plan` | `{"plan_id":"…","approved":false,"feedback":"Revise the approach"}` | Request a revised plan, within Cogito's adjustment limit |
+| `POST /api/chat/:name/plan` | `{"plan_id":"…","approved":false}` | End the turn with a rejection reply |
+| `GET /api/chat/:name/pending` | `?conversation_id=…` | Return `{"questions":[…],"plan":null}` or a pending plan |
+
+The new endpoints use the same authentication as chat. Unknown or already
+answered interaction IDs return `404`; invalid answers or edited plans return
+`400`. The `approved` boolean is required. An edited approved plan must contain
+at least one nonblank step. Omitting `subtasks` keeps the proposed steps.
+
+A chat message for a conversation with a pending free-text question answers it
+instead of starting another job. If that question forbids free text, chat
+returns `409` with `pending_question_id`. Empty or omitted conversation IDs
+retain the stateless chat behavior; answer anonymous questions through the
+explicit answer endpoint. On reconnect, fetch `pending` for the active
+conversation to restore unanswered cards.
+
+Questions and approvals block inside the current tool/hook. They do not spend
+additional model calls while waiting; feedback-based replanning does. Pausing
+or stopping the agent cancels blocked interactions. Registries are in memory:
+restarts clear pending interactions and conversation history. Conversation
+history still expires according to `last_message_duration`.
+
+This fork pins Cogito commit `7a04aa42664abb03939d1e23c7a91ce14fac30f5` through
+a Go module replacement while retaining `github.com/mudler/cogito` imports.
+Applications importing this fork must carry the same replacement in their own
+`go.mod`, because Go does not inherit replacements from dependency modules.

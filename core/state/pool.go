@@ -651,6 +651,19 @@ func (a *AgentPool) startAgentWithConfig(name, pooldir string, config *AgentConf
 		opts = append(opts, EnableForceReasoningTool)
 	}
 
+	opts = append(opts,
+		WithUserQuestionsEnabled(config.EnableUserQuestions),
+		WithRequirePlanApproval(config.RequirePlanApproval),
+		WithInteractionCallback(func(event string, payload any) {
+			data, err := json.Marshal(payload)
+			if err != nil {
+				xlog.Error("Error marshaling interaction", "error", err)
+				return
+			}
+			manager.Send(sseLib.NewMessage(string(data)).WithEvent(event))
+		}),
+	)
+
 	// Wire cogito streaming events into the SSE manager for live token delivery
 	opts = append(opts, WithJobStreamCallback(func(job *types.Job, ev cogito.StreamEvent) {
 		chat.Stream(job, ev, manager.Send)

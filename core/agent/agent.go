@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mudler/LocalAGI/core/interactions"
 	"github.com/mudler/cogito"
 	"github.com/mudler/cogito/clients"
+	"github.com/mudler/cogito/structures"
 
 	"github.com/mudler/xlog"
 
@@ -76,7 +78,9 @@ type Agent struct {
 	sharedState *types.AgentSharedState
 
 	// Task scheduler for managing reminders
-	taskScheduler *scheduler.Scheduler
+	taskScheduler   *scheduler.Scheduler
+	interactions    *interactions.Registry
+	interactiveJobs map[*types.Job]struct{}
 
 	// currentJobByConversation tracks the running job per conversation_id for cancel-previous-on-new-message
 	currentJobByConversation map[string]*types.Job
@@ -116,6 +120,8 @@ func New(opts ...Option) (*Agent, error) {
 		newMessagesSubscribers:   options.newConversationsSubscribers,
 		sharedState:              types.NewAgentSharedState(options.lastMessageDuration),
 		currentJobByConversation: make(map[string]*types.Job),
+		interactions:             interactions.New(options.interactionCallback),
+		interactiveJobs:          make(map[*types.Job]struct{}),
 	}
 
 	// Initialize observer if provided
@@ -181,6 +187,9 @@ func New(opts ...Option) (*Agent, error) {
 func (a *Agent) SharedState() *types.AgentSharedState {
 	return a.sharedState
 }
+
+// Interactions exposes pending questions and plans for chat APIs and embedders.
+func (a *Agent) Interactions() *interactions.Registry { return a.interactions }
 
 // SetStreamCallback sets (or replaces) the stream callback on a live agent.
 // This allows callers to wire streaming events after agent creation,
@@ -465,6 +474,9 @@ func (a *Agent) Pause() {
 	a.Lock()
 	defer a.Unlock()
 	a.pause = true
+	for job := range a.interactiveJobs {
+		job.Cancel()
+	}
 
 }
 
@@ -918,6 +930,13 @@ func (a *Agent) addFunctionResultToConversation(ctx context.Context, chosenActio
 }
 
 func (a *Agent) consumeJob(job *types.Job, role string) {
+	// Bind the Cogito loop (including blocked interactions) to both job and
+	// agent lifetime. A job otherwise starts with an independent background context.
+	stopCancel := context.AfterFunc(a.context.Context, job.Cancel)
+	defer stopCancel()
+	if a.context.Err() != nil {
+		job.Cancel()
+	}
 	streamCallback := a.streamCallbackForJob(job)
 	if err := job.GetContext().Err(); err != nil {
 		job.Result.Finish(fmt.Errorf("expired"))
@@ -926,6 +945,10 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 
 	a.Lock()
 	paused := a.pause
+	if !paused && (a.options.enableUserQuestions || (a.options.canPlan && a.options.requirePlanApproval)) {
+		a.interactiveJobs[job] = struct{}{}
+		defer func() { a.Lock(); delete(a.interactiveJobs, job); a.Unlock() }()
+	}
 	a.Unlock()
 
 	if paused {
@@ -1072,6 +1095,7 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 	var observables = make(map[string]*types.Observable)
 
 	cogitoOpts := []cogito.Option{
+		cogito.WithContext(job.GetContext()),
 		cogito.WithMCPs(a.liveMCPSessions()...),
 		cogito.WithTools(
 			cogitoTools...,
@@ -1166,7 +1190,10 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 			}
 			job.Result.SetResult(state)
 			job.CallbackWithResult(state)
-			conv = a.addFunctionResultToConversation(job.GetContext(), aa, types.ActionParams(t.ToolArguments.Arguments), *actionResult, conv)
+			// Cogito already records built-in tool results in its fragment.
+			if aa != nil {
+				conv = a.addFunctionResultToConversation(job.GetContext(), aa, types.ActionParams(t.ToolArguments.Arguments), *actionResult, conv)
+			}
 		}),
 		cogito.WithToolCallBack(
 			func(tc *cogito.ToolChoice, _ *cogito.SessionState) cogito.ToolCallDecision {
@@ -1210,7 +1237,7 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 							Model:    a.options.LLMAPI.Model,
 							Messages: conv,
 						},
-						FunctionDefinition: chosenAction.Definition().ToFunctionDefinition(),
+						FunctionDefinition: toolFunctionDefinition(chosenAction, tc.Name),
 						FunctionParams:     types.ActionParams(tc.Arguments),
 					}
 
@@ -1339,6 +1366,17 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		),
 	}
 
+	if a.options.enableUserQuestions {
+		cogitoOpts = append(cogitoOpts, cogito.WithUserQuestions(func(ctx context.Context, question cogito.UserQuestion) (cogito.UserAnswer, error) {
+			return a.interactions.HandleQuestion(job, ctx, question)
+		}))
+	}
+	if a.options.canPlan && a.options.requirePlanApproval {
+		cogitoOpts = append(cogitoOpts, cogito.WithPlanApproval(func(ctx context.Context, plan *structures.Plan, goal *structures.Goal) cogito.PlanDecision {
+			return a.interactions.ApprovePlan(job, ctx, plan, goal)
+		}))
+	}
+
 	if a.options.canPlan {
 		cogitoOpts = append(cogitoOpts, cogito.EnableAutoPlan)
 		if a.options.enableEvaluation {
@@ -1396,6 +1434,19 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		a.llm, fragment,
 		cogitoOpts...,
 	)
+
+	// A declined plan is a normal conversational outcome, not a failed chat.
+	// Use a deterministic reply so rejection never spends another model call.
+	if errors.Is(err, cogito.ErrPlanRejected) {
+		reply := "The plan was rejected. No planned work was executed."
+		transcript := append(fragment.Messages, openai.ChatCompletionMessage{Role: AssistantRole, Content: reply})
+		job.Result.Conversation = transcript
+		job.ConversationHistory = transcript
+		job.Result.SetResponse(reply)
+		a.saveCurrentConversation(transcript)
+		job.Result.Finish(nil)
+		return
+	}
 
 	if err != nil && !errors.Is(err, cogito.ErrNoToolSelected) && !errors.Is(err, cogito.ErrGoalNotAchieved) && !userTool {
 		if obs != nil {
@@ -1590,4 +1641,12 @@ func (a *Agent) periodicalRunRunner(timer *time.Timer) {
 
 func (a *Agent) Observer() Observer {
 	return a.observer
+}
+
+// Built-in Cogito tools have no LocalAGI Action, but still need an observable.
+func toolFunctionDefinition(action types.Action, name string) *openai.FunctionDefinition {
+	if action != nil {
+		return action.Definition().ToFunctionDefinition()
+	}
+	return &openai.FunctionDefinition{Name: name}
 }

@@ -73,6 +73,9 @@ func (app *App) registerRoutes(pool *state.AgentPool, webapp *fiber.App) {
 	webapp.Put("/api/agent/:name/start", app.Start(pool))
 
 	webapp.Post("/api/chat/:name", app.Chat(pool))
+	webapp.Post("/api/chat/:name/answer", app.AnswerInteraction(pool))
+	webapp.Post("/api/chat/:name/plan", app.DecidePlan(pool))
+	webapp.Get("/api/chat/:name/pending", app.PendingInteractions(pool))
 
 	webapp.Get("/login", func(c *fiber.Ctx) error {
 		return c.Status(401).Redirect("/app") // After login, just redirect to index

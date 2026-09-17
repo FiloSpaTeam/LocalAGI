@@ -80,12 +80,14 @@ type AgentConfig struct {
 	RandomIdentity             bool   `json:"random_identity" form:"random_identity"`
 	InitiateConversations      bool   `json:"initiate_conversations" form:"initiate_conversations"`
 	CanPlan                    bool   `json:"enable_planning" form:"enable_planning"`
+	EnableUserQuestions        bool   `json:"enable_user_questions" form:"enable_user_questions"`
+	RequirePlanApproval        bool   `json:"require_plan_approval" form:"require_plan_approval"`
 	PlanReviewerModel          string `json:"plan_reviewer_model" form:"plan_reviewer_model"`
 	DisableSinkState           bool   `json:"disable_sink_state" form:"disable_sink_state"`
 	IdentityGuidance           string `json:"identity_guidance" form:"identity_guidance"`
 	PeriodicRuns               string `json:"periodic_runs" form:"periodic_runs"`
 	SchedulerPollInterval      string `json:"scheduler_poll_interval" form:"scheduler_poll_interval"`
-	SchedulerTaskTemplate   string `json:"scheduler_task_template" form:"scheduler_task_template"`
+	SchedulerTaskTemplate      string `json:"scheduler_task_template" form:"scheduler_task_template"`
 	PermanentGoal              string `json:"permanent_goal" form:"permanent_goal"`
 	EnableKnowledgeBase        bool   `json:"enable_kb" form:"enable_kb"`
 	EnableKBCompaction         bool   `json:"enable_kb_compaction" form:"enable_kb_compaction"`
@@ -355,14 +357,14 @@ func NewAgentConfigMeta(
 				HelpText:     "Prompt used for periodic/standalone runs when the agent evaluates what to do next. If empty, the default autonomous agent instructions are used.",
 				Tags:         config.Tags{Section: "PromptsGoals"},
 			},
-				{
-					Name:         "scheduler_task_template",
-					Label:        "Scheduler Task Template",
-					Type:         "textarea",
-					DefaultValue: "",
-					HelpText:     "Template for scheduled/recurring tasks. Use {{.Task}} to reference the task. Example: \"Execute: {{.Task}}\". If empty, the default inner monologue template is used with the task injected.",
-					Tags:         config.Tags{Section: "PromptsGoals"},
-				},
+			{
+				Name:         "scheduler_task_template",
+				Label:        "Scheduler Task Template",
+				Type:         "textarea",
+				DefaultValue: "",
+				HelpText:     "Template for scheduled/recurring tasks. Use {{.Task}} to reference the task. Example: \"Execute: {{.Task}}\". If empty, the default inner monologue template is used with the task injected.",
+				Tags:         config.Tags{Section: "PromptsGoals"},
+			},
 			{
 				Name:         "standalone_job",
 				Label:        "Standalone Job",
@@ -377,6 +379,22 @@ func NewAgentConfigMeta(
 				Type:         "checkbox",
 				DefaultValue: false,
 				HelpText:     "Allow agent to start conversations on its own",
+				Tags:         config.Tags{Section: "AdvancedSettings"},
+			},
+			{
+				Name:         "enable_user_questions",
+				Label:        "Enable User Questions",
+				Type:         "checkbox",
+				DefaultValue: false,
+				HelpText:     "Allow the agent to ask structured questions and wait for answers through the chat API.",
+				Tags:         config.Tags{Section: "AdvancedSettings"},
+			},
+			{
+				Name:         "require_plan_approval",
+				Label:        "Require Plan Approval",
+				Type:         "checkbox",
+				DefaultValue: false,
+				HelpText:     "Wait for approval before executing an automatic plan. Requires Enable Planning.",
 				Tags:         config.Tags{Section: "AdvancedSettings"},
 			},
 			{
@@ -595,8 +613,8 @@ func (a *AgentConfig) UnmarshalJSON(data []byte) error {
 		*Alias
 		MCPSTDIOServersConfig interface{} `json:"mcp_stdio_servers"`
 		MaxEvaluationLoops    interface{} `json:"max_evaluation_loops"`
-		MaxAttempts            interface{} `json:"max_attempts"`
-		ParallelJobs           interface{} `json:"parallel_jobs"`
+		MaxAttempts           interface{} `json:"max_attempts"`
+		ParallelJobs          interface{} `json:"parallel_jobs"`
 		KnowledgeBaseResults  interface{} `json:"kb_results"`
 	}{
 		Alias: (*Alias)(a),
