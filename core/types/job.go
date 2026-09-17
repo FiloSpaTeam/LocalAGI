@@ -14,6 +14,10 @@ import (
 // currently running job for that conversation before enqueueing a new one.
 const MetadataKeyConversationID = "conversation_id"
 
+// MetadataKeyDelegationID isolates sibling delegate cancellation while keeping
+// the parent conversation identity available in metadata and events.
+const MetadataKeyDelegationID = "delegation_id"
+
 // Job is a request to the agent to do something
 type Job struct {
 	// The job is a request to the agent to do something
@@ -23,6 +27,7 @@ type Job struct {
 	ReasoningCallback   func(ActionCurrentState) bool
 	ResultCallback      func(ActionState)
 	StreamCallback      func(cogito.StreamEvent)
+	EventCallback       func(string, any)
 	ConversationHistory []openai.ChatCompletionMessage
 	UUID                string
 	Metadata            map[string]interface{}
@@ -245,4 +250,9 @@ func (j *Job) GetAllTools() []ActionDefinition {
 	allTools = append(allTools, j.BuiltinTools...)
 	allTools = append(allTools, j.UserTools...)
 	return allTools
+}
+
+// WithEventCallback receives job lifecycle events (including parked replies).
+func WithEventCallback(callback func(string, any)) JobOption {
+	return func(job *Job) { job.EventCallback = callback }
 }

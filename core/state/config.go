@@ -52,6 +52,14 @@ type FiltersConfig struct {
 	Config string `json:"config"`
 }
 
+// RemoteAgent describes an OpenAI Responses-compatible agent endpoint.
+type RemoteAgent struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	APIKey      string `json:"api_key,omitempty"`
+}
+
 type AgentConfig struct {
 	Connector        []ConnectorConfig      `json:"connectors" form:"connectors" `
 	Actions          []ActionsConfig        `json:"actions" form:"actions"`
@@ -99,6 +107,7 @@ type AgentConfig struct {
 	EnableForceReasoningTool   bool   `json:"enable_reasoning_tool" form:"enable_reasoning_tool"`
 	EnableGuidedTools          bool   `json:"enable_guided_tools" form:"enable_guided_tools"`
 	EnableSkills               bool   `json:"enable_skills" form:"enable_skills"`
+	EnableSubAgents            bool   `json:"enable_sub_agents" form:"enable_sub_agents"`
 	KnowledgeBaseResults       int    `json:"kb_results" form:"kb_results"`
 	CanStopItself              bool   `json:"can_stop_itself" form:"can_stop_itself"`
 	SystemPrompt               string `json:"system_prompt" form:"system_prompt"`
@@ -116,6 +125,9 @@ type AgentConfig struct {
 	LoopDetection              int    `json:"loop_detection" form:"loop_detection"`
 	EnableAutoCompaction       bool   `json:"enable_auto_compaction" form:"enable_auto_compaction"`
 	AutoCompactionThreshold    int    `json:"auto_compaction_threshold" form:"auto_compaction_threshold"`
+
+	SubAgents    []string      `json:"sub_agents,omitempty" form:"sub_agents"`
+	RemoteAgents []RemoteAgent `json:"remote_agents,omitempty" form:"remote_agents"`
 }
 
 type AgentConfigMeta struct {
@@ -479,6 +491,14 @@ func NewAgentConfigMeta(
 				Type:         "checkbox",
 				DefaultValue: false,
 				HelpText:     "Inject available skills into the agent and expose skill tools (list, read, search, resources) via MCP",
+				Tags:         config.Tags{Section: "AdvancedSettings"},
+			},
+			{
+				Name:         "enable_sub_agents",
+				Label:        "Enable Sub-Agents",
+				Type:         config.FieldTypeCheckbox,
+				DefaultValue: false,
+				HelpText:     "Allow this agent to delegate work to configured local or remote agents.",
 				Tags:         config.Tags{Section: "AdvancedSettings"},
 			},
 			{

@@ -162,4 +162,4 @@ require (
 	maunium.net/go/maulogger/v2 v2.4.1 // indirect
 )
 
-replace github.com/mudler/cogito => github.com/FiloSpaTeam/cogito v0.0.0-20260917083423-7a04aa42664a
+replace github.com/mudler/cogito => github.com/FiloSpaTeam/cogito v0.0.0-20260917131519-8f2ce74a8d14

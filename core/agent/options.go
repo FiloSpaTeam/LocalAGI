@@ -37,6 +37,8 @@ type llmOptions struct {
 }
 
 type options struct {
+	enableSubAgents                                                                              bool
+	subAgentProvider                                                                             func(*types.Job) ([]cogito.AgentDefinition, cogito.AgentDispatcher)
 	LLMAPI                                                                                       llmOptions
 	character                                                                                    Character
 	randomIdentityGuidance                                                                       string

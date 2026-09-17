@@ -376,6 +376,13 @@ func (a *App) Chat(pool *state.AgentPool) func(c *fiber.Ctx) error {
 		// Create a unique message ID
 		messageID := fmt.Sprintf("%d", time.Now().UnixNano())
 
+		if handled, err := agent.InjectChat(payload.ConversationID, message, messageID); handled {
+			if err != nil {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+			}
+			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"status": "message_received", "message_id": messageID})
+		}
+
 		// Copy request values into the asynchronous shared chat lifecycle.
 		go chat.Run(agent, message, payload.ConversationID, messageID, manager.Send)
 

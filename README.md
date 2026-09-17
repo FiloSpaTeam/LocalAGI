@@ -1194,7 +1194,57 @@ or stopping the agent cancels blocked interactions. Registries are in memory:
 restarts clear pending interactions and conversation history. Conversation
 history still expires according to `last_message_duration`.
 
-This fork pins Cogito commit `7a04aa42664abb03939d1e23c7a91ce14fac30f5` through
+### Background delegation and live conversations
+
+Enable delegation on the parent agent:
+
+```json
+{
+  "enable_sub_agents": true,
+  "sub_agents": ["coder"],
+  "remote_agents": [],
+  "max_evaluation_loops": 20,
+  "last_message_duration": "30m"
+}
+```
+
+`sub_agents` is an allow-list of pool agent names. An empty list allows every
+other pool agent; the parent excludes itself. `remote_agents` accepts objects
+with `name`, `description`, `url`, and optional `api_key`. A remote name takes
+precedence over a pool name. Remote work uses `POST {url}/v1/responses` and
+Bearer authentication when configured. Requests follow the job context without
+a fixed HTTP timeout or automatic retries. API keys are stored with agent
+configuration, like the existing LLM API key; restrict access to that configuration.
+
+The model can use `spawn_agent`, `check_agent`, `get_agent_result`, and
+`send_agent_message`. Pool dispatch runs the peer's configured agent; remote
+dispatch uses its Responses endpoint. The existing synchronous `call_agent`
+action remains available independently.
+
+For chat, keep sending the same `conversation_id`. When the parent has replied
+while background work remains, it emits `json_message` followed by
+`json_message_status` with `waiting_agents`. Its live loop stays available:
+follow-up chat is injected into that loop, including while it resumes, without
+cancelling its children. On resume, status becomes `processing`; later replies
+arrive in the same conversation with distinct message IDs. A full input queue
+returns `503` so clients can retry. Once the loop completes, the next chat starts
+a new job with saved history.
+
+`sub_agent` events report `agent_id`, `agent_type`, `status`
+(`spawned`, `completed`, or `failed`), `background`, `task`, and
+`result_summary` (up to 1 KB), plus the parent conversation/message IDs and a
+timestamp. Tool results also appear as `stream_event` with `type: "tool_result"`.
+Conversation history is saved at every park and on successful completion.
+Pausing or stopping the parent cancels its delegated work. Existing iteration
+and attempt limits still bound the whole live job, including follow-up messages;
+set `max_evaluation_loops` to an appropriate budget for the conversation.
+
+History and live loops are in memory. Expired history or a process restart
+starts a fresh server conversation; clients can retain their own transcript.
+This delivery provides standalone/embedded APIs. LocalAI's interactive cards
+and distributed native-executor support follow separately.
+
+This fork pins Cogito commit `8f2ce74a8d14d138a1bde69f379d1258f0a4489c` through
 a Go module replacement while retaining `github.com/mudler/cogito` imports.
 Applications importing this fork must carry the same replacement in their own
 `go.mod`, because Go does not inherit replacements from dependency modules.

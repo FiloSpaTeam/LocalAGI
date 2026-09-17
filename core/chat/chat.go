@@ -22,9 +22,26 @@ type Agent interface {
 // send receives SSE envelopes, including conversation and message correlation.
 func Run(agent Agent, message, conversationID, messageID string, send func(sse.Envelope)) {
 	emit := func(event string, data map[string]any) { emitEvent(send, event, conversationID, messageID, data) }
+	// Retry admission here as well as at the HTTP boundary: the existing job may
+	// park between request validation and this asynchronous lifecycle starting.
+	if live, ok := agent.(interface {
+		InjectChat(string, string, string) (bool, error)
+	}); ok {
+		if handled, err := live.InjectChat(conversationID, message, messageID); handled {
+			if err != nil {
+				emit("json_error", map[string]any{"error": err.Error()})
+				emit("json_message_status", map[string]any{"status": "completed"})
+			}
+			return
+		}
+	}
+
 	emit("json_message", map[string]any{"id": messageID + "-user", "sender": "user", "content": message})
 	emit("json_message_status", map[string]any{"status": "processing"})
-	opts := []types.JobOption{types.WithUUID(messageID)}
+	opts := []types.JobOption{types.WithUUID(messageID), types.WithEventCallback(func(event string, payload any) {
+		data, _ := json.Marshal(payload)
+		send(sse.NewMessage(string(data)).WithEvent(event))
+	})}
 	if conversationID != "" {
 		opts = append(opts, types.WithConversationHistory(agent.SharedState().ConversationTracker.GetConversation(conversationID)), types.WithMetadata(map[string]any{types.MetadataKeyConversationID: conversationID}))
 	}
@@ -36,7 +53,7 @@ func Run(agent Agent, message, conversationID, messageID string, send func(sse.E
 	case response.Error != nil:
 		emit("json_error", map[string]any{"error": response.Error.Error()})
 	default:
-		if conversationID != "" {
+		if conversationID != "" && !response.ConversationSaved {
 			agent.SharedState().ConversationTracker.SetConversation(conversationID, response.Conversation)
 		}
 		emit("json_message", map[string]any{"id": messageID + "-agent", "sender": "agent", "content": response.Response})
@@ -55,6 +72,12 @@ func Stream(job *types.Job, event cogito.StreamEvent, send func(sse.Envelope)) {
 	case cogito.StreamEventToolCall:
 		data["tool_name"] = event.ToolName
 		data["tool_args"] = event.ToolArgs
+	case cogito.StreamEventToolResult:
+		data["tool_name"] = event.ToolName
+		data["tool_result"] = event.ToolResult
+		if event.AgentID != "" {
+			data["agent_id"] = event.AgentID
+		}
 	case cogito.StreamEventDone:
 	default:
 		return

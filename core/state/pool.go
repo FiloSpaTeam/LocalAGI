@@ -652,6 +652,8 @@ func (a *AgentPool) startAgentWithConfig(name, pooldir string, config *AgentConf
 	}
 
 	opts = append(opts,
+		WithSubAgents(config.EnableSubAgents),
+		WithSubAgentProvider(a.subAgentProvider(name, config)),
 		WithUserQuestionsEnabled(config.EnableUserQuestions),
 		WithRequirePlanApproval(config.RequirePlanApproval),
 		WithInteractionCallback(func(event string, payload any) {
@@ -669,7 +671,7 @@ func (a *AgentPool) startAgentWithConfig(name, pooldir string, config *AgentConf
 		chat.Stream(job, ev, manager.Send)
 	}))
 
-	xlog.Info("Starting agent", "name", name, "config", config)
+	xlog.Info("Starting agent", "name", name)
 
 	agent, err := New(opts...)
 	if err != nil {
@@ -689,7 +691,7 @@ func (a *AgentPool) startAgentWithConfig(name, pooldir string, config *AgentConf
 		go runCompactionTicker(ctx, compactionClient, config, effectiveAPIURL, effectiveAPIKey, model)
 	}
 
-	xlog.Info("Starting connectors", "name", name, "config", config)
+	xlog.Info("Starting connectors", "name", name)
 
 	for _, c := range connectors {
 		go c.Start(agent)

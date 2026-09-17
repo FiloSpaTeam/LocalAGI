@@ -191,3 +191,16 @@ func TestLegacyStreamPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestToolResultStreamCarriesDelegationIdentity(t *testing.T) {
+	job := types.NewJob(types.WithUUID("root-message"), types.WithMetadata(map[string]any{types.MetadataKeyConversationID: "conversation"}))
+	var payload map[string]any
+	Stream(job, cogito.StreamEvent{Type: cogito.StreamEventToolResult, ToolName: "build", ToolResult: "passed", AgentID: "child"}, func(event sse.Envelope) {
+		if err := json.Unmarshal([]byte(event.(*sse.Message).Data), &payload); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if payload["tool_result"] != "passed" || payload["agent_id"] != "child" || payload["conversation_id"] != "conversation" || payload["message_id"] != "root-message" {
+		t.Fatalf("tool result=%v", payload)
+	}
+}

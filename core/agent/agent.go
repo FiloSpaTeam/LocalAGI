@@ -48,6 +48,8 @@ func (t NoToolToCallTool) Run(args NoToolToCallArgs) (string, any, error) {
 }
 
 type Agent struct {
+	liveMu            sync.Mutex
+	liveConversations map[string]*conversationLoop
 	sync.Mutex
 	options   *options
 	Character Character
@@ -122,6 +124,7 @@ func New(opts ...Option) (*Agent, error) {
 		currentJobByConversation: make(map[string]*types.Job),
 		interactions:             interactions.New(options.interactionCallback),
 		interactiveJobs:          make(map[*types.Job]struct{}),
+		liveConversations:        make(map[string]*conversationLoop),
 	}
 
 	// Initialize observer if provided
@@ -405,7 +408,7 @@ func (a *Agent) Enqueue(j *types.Job) {
 	// Cancel previous running job for this conversation if option is enabled
 	cancelPrevious := a.options.cancelPreviousOnNewMessage == nil || *a.options.cancelPreviousOnNewMessage
 	if cancelPrevious && j.Metadata != nil {
-		if convID, ok := j.Metadata[types.MetadataKeyConversationID].(string); ok && convID != "" {
+		if convID := jobCancellationKey(j); convID != "" {
 			a.currentJobMu.Lock()
 			existing := a.currentJobByConversation[convID]
 			a.currentJobMu.Unlock()
@@ -415,7 +418,13 @@ func (a *Agent) Enqueue(j *types.Job) {
 		}
 	}
 
-	a.jobQueue <- j
+	select {
+	case a.jobQueue <- j:
+	case <-j.GetContext().Done():
+		j.Result.Finish(j.GetContext().Err())
+	case <-a.context.Done():
+		j.Result.Finish(a.context.Err())
+	}
 }
 
 func (a *Agent) Transcribe(ctx context.Context, file string) (string, error) {
@@ -945,7 +954,7 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 
 	a.Lock()
 	paused := a.pause
-	if !paused && (a.options.enableUserQuestions || (a.options.canPlan && a.options.requirePlanApproval)) {
+	if !paused && (a.options.enableSubAgents || a.options.enableUserQuestions || (a.options.canPlan && a.options.requirePlanApproval)) {
 		a.interactiveJobs[job] = struct{}{}
 		defer func() { a.Lock(); delete(a.interactiveJobs, job); a.Unlock() }()
 	}
@@ -960,7 +969,7 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 	// Register this job as the current one for its conversation (for cancel-previous-on-new-message)
 	var conversationID string
 	if job.Metadata != nil {
-		if cid, ok := job.Metadata[types.MetadataKeyConversationID].(string); ok && cid != "" {
+		if cid := jobCancellationKey(job); cid != "" {
 			conversationID = cid
 			a.currentJobMu.Lock()
 			a.currentJobByConversation[conversationID] = job
@@ -1366,6 +1375,14 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		),
 	}
 
+	var finishDelegation func(cogito.Fragment) cogito.Fragment
+	if a.options.enableSubAgents {
+		delegationOpts, cleanup, finish := a.delegationOptions(job)
+		defer cleanup()
+		finishDelegation = finish
+		cogitoOpts = append(cogitoOpts, delegationOpts...)
+	}
+
 	if a.options.enableUserQuestions {
 		cogitoOpts = append(cogitoOpts, cogito.WithUserQuestions(func(ctx context.Context, question cogito.UserQuestion) (cogito.UserAnswer, error) {
 			return a.interactions.HandleQuestion(job, ctx, question)
@@ -1435,6 +1452,16 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		cogitoOpts...,
 	)
 
+	terminalReply := ""
+	if len(fragment.Messages) > 0 {
+		terminalReply = fragment.LastMessage().Content
+	}
+	if finishDelegation != nil {
+		fragment = finishDelegation(fragment)
+		job.Result.Conversation = fragment.Messages
+		a.saveLiveConversation(job)
+	}
+
 	// A declined plan is a normal conversational outcome, not a failed chat.
 	// Use a deterministic reply so rejection never spends another model call.
 	if errors.Is(err, cogito.ErrPlanRejected) {
@@ -1444,6 +1471,7 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		job.ConversationHistory = transcript
 		job.Result.SetResponse(reply)
 		a.saveCurrentConversation(transcript)
+		a.saveLiveConversation(job)
 		job.Result.Finish(nil)
 		return
 	}
@@ -1482,12 +1510,16 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		return
 	}
 
-	result := a.cleanupLLMResponse(fragment.LastMessage().Content)
+	result := a.cleanupLLMResponse(terminalReply)
 
 	conv = append(fragment.Messages, openai.ChatCompletionMessage{
 		Role:    "assistant",
 		Content: result,
 	})
+
+	if finishDelegation != nil {
+		conv = fragment.Messages
+	}
 
 	job.Result.Plans = fragment.Status.Plans
 	job.Result.Conversation = conv
@@ -1496,6 +1528,7 @@ func (a *Agent) consumeJob(job *types.Job, role string) {
 		a.saveCurrentConversation(conv)
 	})
 	job.Result.SetResponse(result)
+	a.saveLiveConversation(job)
 	job.Result.Finish(nil)
 }
 

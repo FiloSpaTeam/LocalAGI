@@ -18,9 +18,11 @@ type JobResult struct {
 
 	Finalizers []func([]openai.ChatCompletionMessage)
 
-	Response string
-	Error    error
-	ready    chan bool
+	// ConversationSaved is set before completion when the live loop saved final history.
+	ConversationSaved bool
+	Response          string
+	Error             error
+	ready             chan bool
 }
 
 // SetResult sets the result of a job
